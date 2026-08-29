@@ -1009,10 +1009,12 @@ async def process_card_async(cc, mes, ano, cvv, site_url, variant_id=None, proxy
 app = Flask(__name__)
 
 @app.route('/shopify', methods=['GET'])
+@app.route('/shopify/check', methods=['GET'])
 def shopify_checker():
     try:
-        site = request.args.get('url')
-        cc_string = request.args.get('cc')
+        # Accept site as 'url' OR 'site' (and aliases used by the client)
+        site = request.args.get('url') or request.args.get('site') or request.args.get('link')
+        cc_string = request.args.get('cc') or request.args.get('card')
         proxy_str = request.args.get('proxy')
         
         if not site:
@@ -1072,6 +1074,19 @@ def shopify_checker():
             "Response": f"ERROR: {str(e)}",
             "cc": request.args.get('cc', '')
         }), 500
+
+
+@app.route('/shopify/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok", "service": "api-shopi"})
+
+
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({
+        "status": "ok",
+        "usage": "/shopify?url=<store>.myshopify.com&cc=CC|MM|YYYY|CVV&proxy=http://host:port"
+    })
 
 if __name__ == "__main__":
     app.run(
