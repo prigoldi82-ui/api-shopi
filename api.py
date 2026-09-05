@@ -11,10 +11,10 @@ import time
 import logging
 import functools
 
-# Force prints to flush immediately (so logs appear in real-time on Railway)
+
 print = functools.partial(print, flush=True)
 
-# PRINT MODE OFF - set True to enable debug logs
+
 ENABLE_PRINTS = False
 if not ENABLE_PRINTS:
     print = lambda *args, **kwargs: None
@@ -571,7 +571,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                     return False, "Negotiation failed", gateway, total_price, currency
                 
                 checkpoint_data = result.get('checkpointData')
-                # FIX FOR DELIVERY_DELIVERY_LINE_DETAIL_CHANGED: capture fresh queueToken
+
                 fresh_queue = result.get('queueToken')
                 if fresh_queue:
                     queueToken = fresh_queue
@@ -650,7 +650,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
             print(f"[PROPOSAL] delivery_strategy={delivery_strategy} shipping={shipping_amount} "
                   f"tax={tax_amount} running_total={running_total} gateway={gateway}")
 
-            # FIX FOR DELIVERY_DELIVERY_LINE_DETAIL_CHANGED: inject latest checkpoint & queueToken + refresh stableId
+
             if checkpoint_data:
                 json_data['variables']['checkpointData'] = checkpoint_data
             if queueToken:
@@ -689,7 +689,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
             json_data['variables']['taxes']['proposedTotalAmount']['value']['amount'] = str(tax_amount)
             json_data['variables']['buyerIdentity']['shopPayOptInPhone']['number'] = phone
 
-            # FIX: retry loop for DELIVERY_DELIVERY_LINE_DETAIL_CHANGED in delivery proposal
+
             for _retry in range(3):
                 response, resp_text, captcha_solved = await make_graphql_request_with_captcha_handling(
                     session, graphql_url, params, headers, json_data, checkout_url, max_retries=1
@@ -704,7 +704,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                     continue
                 break
 
-            # if still failing, do full re-sync with shipping proposal
+
             if 'DELIVERY_DELIVERY_LINE_DETAIL_CHANGED' in resp_text:
                 print("[FIX] Still DELIVERY_DELIVERY_LINE_DETAIL_CHANGED, full re-sync")
                 tmp_vars = {
@@ -1023,7 +1023,7 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                 'operationName': 'SubmitForCompletion'
             }
 
-            # FIX FOR DELIVERY_DELIVERY_LINE_DETAIL_CHANGED in submit
+
             for submit_retry in range(3):
                 response, text, captcha_solved = await make_graphql_request_with_captcha_handling(
                     session, graphql_url, params, headers, submit_json_data, checkout_url, max_retries=1
@@ -1259,12 +1259,12 @@ app = Flask(__name__)
 @app.route('/shopify/check', methods=['GET'])
 def shopify_checker():
     try:
-        # Accept site as 'url' OR 'site' (and aliases used by the client)
+
         site = request.args.get('url') or request.args.get('site') or request.args.get('link')
         cc_string = request.args.get('cc') or request.args.get('card')
         proxy_str = request.args.get('proxy')
 
-        # Log incoming request like the Flask access log
+
         print(f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] GET {request.path} "
               f"site={site} cc={cc_string} proxy={proxy_str} "
               f"client={request.remote_addr}")
