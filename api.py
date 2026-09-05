@@ -12,7 +12,12 @@ import logging
 import functools
 
 # Force prints to flush immediately (so logs appear in real-time on Railway)
-print = lambda *args, **kwargs: None
+print = functools.partial(print, flush=True)
+
+# PRINT MODE OFF - set True to enable debug logs
+ENABLE_PRINTS = False
+if not ENABLE_PRINTS:
+    print = lambda *args, **kwargs: None
 
 logging.getLogger("werkzeug").disabled = True
 
@@ -566,6 +571,10 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                     return False, "Negotiation failed", gateway, total_price, currency
                 
                 checkpoint_data = result.get('checkpointData')
+                # FIX FOR DELIVERY_DELIVERY_LINE_DETAIL_CHANGED: capture fresh queueToken
+                fresh_queue = result.get('queueToken')
+                if fresh_queue:
+                    queueToken = fresh_queue
                 
                 seller_proposal = result.get('sellerProposal')
                 if seller_proposal is None:
@@ -641,6 +650,19 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
             print(f"[PROPOSAL] delivery_strategy={delivery_strategy} shipping={shipping_amount} "
                   f"tax={tax_amount} running_total={running_total} gateway={gateway}")
 
+            # FIX FOR DELIVERY_DELIVERY_LINE_DETAIL_CHANGED: inject latest checkpoint & queueToken + refresh stableId
+            if checkpoint_data:
+                json_data['variables']['checkpointData'] = checkpoint_data
+            if queueToken:
+                json_data['variables']['queueToken'] = queueToken
+            try:
+                fresh_merch = seller_proposal.get('merchandise', {}).get('merchandiseLines', [])
+                if fresh_merch and fresh_merch[0].get('stableId'):
+                    stableId = fresh_merch[0].get('stableId')
+                    json_data['variables']['merchandise']['merchandiseLines'][0]['stableId'] = stableId
+            except:
+                pass
+
             json_data['query'] = QUERY_PROPOSAL_DELIVERY
             json_data['variables']['delivery']['deliveryLines'][0]['selectedDeliveryStrategy'] = {
                 'deliveryStrategyByHandle': {
@@ -667,9 +689,163 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
             json_data['variables']['taxes']['proposedTotalAmount']['value']['amount'] = str(tax_amount)
             json_data['variables']['buyerIdentity']['shopPayOptInPhone']['number'] = phone
 
-            response, resp_text, captcha_solved = await make_graphql_request_with_captcha_handling(
-                session, graphql_url, params, headers, json_data, checkout_url, max_retries=1
-            )
+            # FIX: retry loop for DELIVERY_DELIVERY_LINE_DETAIL_CHANGED in delivery proposal
+            for _retry in range(3):
+                response, resp_text, captcha_solved = await make_graphql_request_with_captcha_handling(
+                    session, graphql_url, params, headers, json_data, checkout_url, max_retries=1
+                )
+                if 'DELIVERY_DELIVERY_LINE_DETAIL_CHANGED' in resp_text:
+                    print(f"[FIX] DELIVERY_DELIVERY_LINE_DETAIL_CHANGED in delivery proposal retry {_retry+1}/3")
+                    await asyncio.sleep(0.7 + _retry*0.5)
+                    if checkpoint_data:
+                        json_data['variables']['checkpointData'] = checkpoint_data
+                    if queueToken:
+                        json_data['variables']['queueToken'] = queueToken
+                    continue
+                break
+
+            # if still failing, do full re-sync with shipping proposal
+            if 'DELIVERY_DELIVERY_LINE_DETAIL_CHANGED' in resp_text:
+                print("[FIX] Still DELIVERY_DELIVERY_LINE_DETAIL_CHANGED, full re-sync")
+                tmp_vars = {
+                    'sessionInput': {'sessionToken': sst},
+                    'queueToken': queueToken or '',
+                    'checkpointData': checkpoint_data,
+                    'discounts': {'lines': [], 'acceptUnexpectedDiscounts': True},
+                    'delivery': {
+                        'deliveryLines': [{
+                            'destination': {
+                                'partialStreetAddress': {
+                                    'address1': street, 'address2': address2, 'city': city,
+                                    'countryCode': country_code, 'postalCode': s_zip,
+                                    'firstName': firstName, 'lastName': lastName,
+                                    'zoneCode': state, 'phone': phone
+                                }
+                            },
+                            'selectedDeliveryStrategy': {
+                                'deliveryStrategyMatchingConditions': {
+                                    'estimatedTimeInTransit': {'any': True},
+                                    'shipments': {'any': True}
+                                },
+                                'options': {}
+                            },
+                            'targetMerchandiseLines': {'any': True},
+                            'deliveryMethodTypes': ['SHIPPING'],
+                            'expectedTotalPrice': {'any': True},
+                            'destinationChanged': True
+                        }],
+                        'noDeliveryRequired': [],
+                        'useProgressiveRates': False,
+                        'prefetchShippingRatesStrategy': None,
+                        'supportsSplitShipping': True
+                    },
+                    'deliveryExpectations': {'deliveryExpectationLines': []},
+                    'merchandise': {
+                        'merchandiseLines': [{
+                            'stableId': stableId or '1',
+                            'merchandise': {
+                                'productVariantReference': {
+                                    'id': f'gid://shopify/ProductVariantMerchandise/{merch}',
+                                    'variantId': f'gid://shopify/ProductVariant/{variant_id}',
+                                    'properties': [],
+                                    'sellingPlanId': None,
+                                    'sellingPlanDigest': None
+                                }
+                            },
+                            'quantity': {'items': {'value': 1}},
+                            'expectedTotalPrice': {'value': {'amount': subtotal, 'currencyCode': currency}},
+                            'lineComponentsSource': None,
+                            'lineComponents': []
+                        }]
+                    },
+                    'payment': {
+                        'totalAmount': {'any': True},
+                        'paymentLines': [],
+                        'billingAddress': {
+                            'streetAddress': {
+                                'address1': '', 'city': '', 'countryCode': country_code,
+                                'lastName': '', 'zoneCode': 'ENG', 'phone': ''
+                            }
+                        }
+                    },
+                    'buyerIdentity': {
+                        'customer': {'presentmentCurrency': currency, 'countryCode': country_code},
+                        'email': email,
+                        'emailChanged': False,
+                        'phoneCountryCode': country_code,
+                        'marketingConsent': [{'email': {'value': email}}],
+                        'shopPayOptInPhone': {'countryCode': country_code},
+                        'rememberMe': False
+                    },
+                    'tip': {'tipLines': []},
+                    'taxes': {
+                        'proposedAllocations': None,
+                        'proposedTotalAmount': {'value': {'amount': '0', 'currencyCode': currency}},
+                        'proposedTotalIncludedAmount': None,
+                        'proposedMixedStateTotalAmount': None,
+                        'proposedExemptions': []
+                    },
+                    'note': {'message': None, 'customAttributes': []},
+                    'localizationExtension': {'fields': []},
+                    'nonNegotiableTerms': None,
+                    'scriptFingerprint': {
+                        'signature': None,
+                        'signatureUuid': None,
+                        'lineItemScriptChanges': [],
+                        'paymentScriptChanges': [],
+                        'shippingScriptChanges': []
+                    },
+                    'optionalDuties': {'buyerRefusesDuties': False}
+                }
+                tmp_json = {'query': QUERY_PROPOSAL_SHIPPING, 'variables': tmp_vars, 'operationName': 'Proposal'}
+                resp2, txt2, _ = await make_graphql_request_with_captcha_handling(session, graphql_url, params, headers, tmp_json, checkout_url, max_retries=1)
+                try:
+                    tj = json.loads(txt2)
+                    tr = tj.get('data', {}).get('session', {}).get('negotiate', {}).get('result', {})
+                    if tr.get('checkpointData'):
+                        checkpoint_data = tr.get('checkpointData')
+                    if tr.get('queueToken'):
+                        queueToken = tr.get('queueToken')
+                    tseller = tr.get('sellerProposal')
+                    if tseller:
+                        seller_proposal = tseller
+                        rt = tseller.get('runningTotal', {}).get('value', {}).get('amount')
+                        if rt:
+                            running_total = rt
+                        dd = tseller.get('delivery', {})
+                        if dd and dd.get('__typename') == 'FilledDeliveryTerms':
+                            dls = dd.get('deliveryLines', [])
+                            if dls and dls[0].get('availableDeliveryStrategies'):
+                                delivery_strategy = dls[0]['availableDeliveryStrategies'][0].get('handle','')
+                                sa = dls[0]['availableDeliveryStrategies'][0].get('amount',{}).get('value',{}).get('amount','0')
+                                try:
+                                    shipping_amount = float(sa)
+                                except:
+                                    shipping_amount = 0.0
+                except:
+                    pass
+                json_data['query'] = QUERY_PROPOSAL_DELIVERY
+                json_data['variables']['delivery']['deliveryLines'][0]['selectedDeliveryStrategy'] = {
+                    'deliveryStrategyByHandle': {
+                        'handle': delivery_strategy if delivery_strategy else '',
+                        'customDeliveryRate': False
+                    },
+                    'options': {}
+                }
+                json_data['variables']['delivery']['deliveryLines'][0]['targetMerchandiseLines'] = {
+                    'lines': [{'stableId': stableId or '1'}]
+                }
+                json_data['variables']['delivery']['deliveryLines'][0]['expectedTotalPrice'] = {
+                    'value': {'amount': str(shipping_amount), 'currencyCode': currency}
+                }
+                json_data['variables']['delivery']['deliveryLines'][0]['destinationChanged'] = False
+                if checkpoint_data:
+                    json_data['variables']['checkpointData'] = checkpoint_data
+                if queueToken:
+                    json_data['variables']['queueToken'] = queueToken
+                response, resp_text, captcha_solved = await make_graphql_request_with_captcha_handling(
+                    session, graphql_url, params, headers, json_data, checkout_url, max_retries=1
+                )
             
             if is_captcha_required(resp_text):
                 return False, "CAPTCHA_REQUIRED on delivery proposal", gateway, total_price, currency
@@ -847,9 +1023,63 @@ async def process_card(cc, mes, ano, cvv, site_url, variant_id=None, proxy_str=N
                 'operationName': 'SubmitForCompletion'
             }
 
-            response, text, captcha_solved = await make_graphql_request_with_captcha_handling(
-                session, graphql_url, params, headers, submit_json_data, checkout_url, max_retries=1
-            )
+            # FIX FOR DELIVERY_DELIVERY_LINE_DETAIL_CHANGED in submit
+            for submit_retry in range(3):
+                response, text, captcha_solved = await make_graphql_request_with_captcha_handling(
+                    session, graphql_url, params, headers, submit_json_data, checkout_url, max_retries=1
+                )
+                if 'DELIVERY_DELIVERY_LINE_DETAIL_CHANGED' in text:
+                    print(f"[FIX] DELIVERY_DELIVERY_LINE_DETAIL_CHANGED in submit retry {submit_retry+1}/3 - re-syncing")
+                    try:
+                        fresh_vars = {
+                            'sessionInput': {'sessionToken': sst},
+                            'queueToken': queueToken or '',
+                            'checkpointData': checkpoint_data,
+                            'discounts': {'lines': [], 'acceptUnexpectedDiscounts': True},
+                            'delivery': json_data['variables']['delivery'],
+                            'merchandise': json_data['variables']['merchandise'],
+                            'payment': {
+                                'totalAmount': {'any': True},
+                                'paymentLines': [],
+                                'billingAddress': {'streetAddress': {'address1': '', 'city': '', 'countryCode': country_code, 'lastName': '', 'zoneCode': 'ENG', 'phone': ''}}
+                            },
+                            'buyerIdentity': json_data['variables']['buyerIdentity'],
+                            'tip': {'tipLines': []},
+                            'taxes': json_data['variables']['taxes'],
+                            'note': {'message': None, 'customAttributes': []},
+                            'localizationExtension': {'fields': []},
+                            'nonNegotiableTerms': None,
+                            'scriptFingerprint': {'signature': None, 'signatureUuid': None, 'lineItemScriptChanges': [], 'paymentScriptChanges': [], 'shippingScriptChanges': []},
+                            'optionalDuties': {'buyerRefusesDuties': False}
+                        }
+                        fresh_json = {'query': QUERY_PROPOSAL_DELIVERY, 'variables': fresh_vars, 'operationName': 'Proposal'}
+                        _r, _t, _ = await make_graphql_request_with_captcha_handling(session, graphql_url, {'operationName': 'Proposal'}, headers, fresh_json, checkout_url, max_retries=1)
+                        _j = json.loads(_t)
+                        _res = _j.get('data', {}).get('session', {}).get('negotiate', {}).get('result', {})
+                        if _res.get('checkpointData'):
+                            checkpoint_data = _res.get('checkpointData')
+                            submit_json_data['variables']['input']['checkpointData'] = checkpoint_data
+                            submit_variables['input']['checkpointData'] = checkpoint_data
+                        if _res.get('queueToken'):
+                            queueToken = _res.get('queueToken')
+                            submit_json_data['variables']['input']['queueToken'] = queueToken
+                            submit_variables['input']['queueToken'] = queueToken
+                        _seller = _res.get('sellerProposal')
+                        if _seller and _seller.get('runningTotal'):
+                            rt = _seller.get('runningTotal', {}).get('value', {}).get('amount')
+                            if rt:
+                                running_total = rt
+                                submit_json_data['variables']['input']['payment']['paymentLines'][0]['amount']['value']['amount'] = running_total
+                                submit_variables['input']['payment']['paymentLines'][0]['amount']['value']['amount'] = running_total
+                    except Exception as e:
+                        print(f"[FIX] re-sync failed: {e}")
+                    await asyncio.sleep(0.8 + submit_retry*0.5)
+                    continue
+                break
+
+            if 'DELIVERY_DELIVERY_LINE_DETAIL_CHANGED' in text:
+                print("[FIX] DELIVERY_DELIVERY_LINE_DETAIL_CHANGED still after submit retries")
+                return False, "DELIVERY_LINE_CHANGED_RETRY", gateway, total_price, currency
             
             if is_captcha_required(text):
                 return False, "CAPTCHA_REQUIRED on submit", gateway, total_price, currency
