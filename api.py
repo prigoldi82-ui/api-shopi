@@ -21,7 +21,7 @@ if not ENABLE_PRINTS:
 
 logging.getLogger("werkzeug").disabled = True
 
-# --- MINIMAL FIX: Retry detection for multiple site errors ---
+
 RETRY_ERRORS = [
     "DELIVERY_LINE_CHANGED_RETRY",
     "DELIVERY_DELIVERY_LINE_DETAIL_CHANGED",
@@ -46,12 +46,12 @@ def _is_delivery_retry(msg):
     for err in RETRY_ERRORS:
         if err in m:
             return True
-    # Generic delivery changed check
+
     if "DELIVERY" in m and "CHANGED" in m:
         return True
     return False
 
-# Alias for new errors - same logic
+
 def _is_retryable_error(msg):
     return _is_delivery_retry(msg)
 
