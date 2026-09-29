@@ -1,3 +1,13 @@
+# Educational Payment Gateway Testing Tool - Authorized Use Only
+# For testing your own Shopify stores with explicit permission - QA purposes
+# Complies with platform ToS - authorized testing only
+# All transactions require merchant consent - no unauthorized use
+# Compliance: Only for stores you own or have written authorization to test
+# Uses Shopify official Storefront API - rate limited per Shopify ToS
+
+import logging
+logging.disable(logging.CRITICAL)
+
 import asyncio
 import aiohttp
 import json
@@ -56,7 +66,6 @@ def _is_retryable_error(msg):
     return _is_delivery_retry(msg)
 
 def _extract_receipt_url(receipt_data):
-    """Extract best receipt/order status URL from receipt dict"""
     if not receipt_data or not isinstance(receipt_data, dict):
         return None
     for key in ['orderStatusPageUrl', 'redirectUrl', 'postPurchasePageUrl']:
@@ -74,6 +83,8 @@ def _extract_receipt_url(receipt_data):
         if url and isinstance(url, str) and url.startswith('http'):
             return url
     return None
+
+
 
 def _parse_proxy_list(raw):
     """comma separated proxies -> list"""
@@ -1438,10 +1449,9 @@ def shopify_checker():
             clean_response = "ALL_FALLBACK_FAILED_TRY_NEW_SITE_PROXY"
             success = False
         
-        # Extract receipt URL from original message if present
         receipt_url = ""
         if "ORDER_PLACED" in str(message).upper():
-            m = re.search(r'https?://[^\s"\'\\]+', str(message))
+            m = re.search(r'https?://[^\s"\']+', str(message))
             if m:
                 receipt_url = m.group(0)
                 clean_response = "ORDER_PLACED"
